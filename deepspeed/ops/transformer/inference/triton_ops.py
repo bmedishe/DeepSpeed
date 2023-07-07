@@ -18,7 +18,6 @@ def _fwd_kernel(
     K,
     V,
     sm_scale,
-    TMP,
     Out,
     stride_qz,
     stride_qh,
@@ -57,7 +56,6 @@ def _fwd_kernel(
     k_ptrs = K + off_k
     v_ptrs = V + off_v
     # initialize pointer to m and l
-    t_ptrs = TMP + off_hz * N_CTX + offs_m
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
@@ -68,9 +66,7 @@ def _fwd_kernel(
         start_n = tl.multiple_of(start_n, BLOCK_N)
         # -- compute qk ----
         k = tl.load(k_ptrs + start_n * stride_kn)
-
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.dot(q, k, trans_b=True)
+        qk = tl.dot(q, tl.trans(k))
         qk *= sm_scale
         # -- compute m_ij, p, l_ij
         m_ij = tl.max(qk, 1)
@@ -87,8 +83,6 @@ def _fwd_kernel(
         p = p * p_scale[:, None]
         # scale acc
         acc_scale = l_i / l_i_new * alpha
-        tl.store(t_ptrs, acc_scale)
-        acc_scale = tl.load(t_ptrs)  # BUG: have to store and immediately load
         acc = acc * acc_scale[:, None]
         # update acc
         v = tl.load(v_ptrs + start_n * stride_vk)
@@ -111,6 +105,7 @@ class triton_flash_attn(torch.nn.Module):
 
     def forward(self, q, k, v, sm_scale, block_128=True):
         BLOCK = 128 if block_128 else 64
+        #BLOCK = 64
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         o = torch.empty_like(q)
@@ -123,7 +118,6 @@ class triton_flash_attn(torch.nn.Module):
             k,
             v,
             sm_scale,
-            tmp,
             o,
             q.stride(0),
             q.stride(1),
